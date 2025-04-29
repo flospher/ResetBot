@@ -1,0 +1,134 @@
+import os
+import requests
+import telebot
+import uuid
+import logging
+import time
+from user_agent import generate_user_agent
+from flask import Flask, request
+
+# Setup logging for error tracking
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Configuration - using environment variables for security
+ADMIN_ID = os.getenv('ADMIN_ID', '6150094366')
+TOKEN = os.getenv('TELEGRAM_TOKEN', '7905529201:AAH0jautCX4toAEHlgb1WqbyXL7kDnbzsNQ')
+RESET_ENABLED = True  # Default state
+USER_COOLDOWN = {}  # Track user cooldowns
+COOLDOWN_TIME = 10  # 10 sec in seconds
+
+# Initialize Flask app
+app = Flask(__name__)
+
+# Initialize bot
+bot = telebot.TeleBot(TOKEN)
+
+# Your existing functions (check_cooldown, send_reset_request, try_mobile_api, try_web_api, try_alternative_domains)
+# ... [keep all the existing functions exactly as they are] ...
+
+# Telegram bot handlers
+@bot.message_handler(commands=['start', 'help'])
+def send_welcome(message):
+    """Send welcome message and instructions"""
+    help_text = """🌟 *Instagram Password Reset Bot* 🌟
+
+🔹 *How to use:*
+- Send `/reset username_or_email` to send a password reset link
+
+*- The link will be sent to the email associated with the account.*
+
+⚠️ *Note:* There's a 10 second cooldown between requests to avoid rate limits."""
+    
+    bot.reply_to(message, help_text, parse_mode='Markdown')
+
+@bot.message_handler(commands=['reset'])
+def handle_reset(message):
+    """Handle password reset requests"""
+    if not RESET_ENABLED:
+        bot.reply_to(message, "❌ Password reset functionality is currently disabled by admin.")
+        return
+        
+    user_id = message.from_user.id
+    cooldown = check_cooldown(user_id)
+    
+    if cooldown > 0:
+        mins, secs = divmod(int(cooldown), 60)
+        bot.reply_to(message, f"⏳ Please wait {secs} seconds before making another request.")
+        return
+        
+    try:
+        # Extract username/email from command
+        command_parts = message.text.split()
+        if len(command_parts) < 2:
+            bot.reply_to(message, "⚠️ Please use the format: /reset username_or_email")
+            return
+            
+        target = command_parts[1].strip()
+        
+        # Send processing message
+        processing_msg = bot.reply_to(message, f"🔄 Processing reset request for: {target}...")
+        
+        # Attempt password reset
+        result = send_reset_request(target)
+        
+        # Set cooldown if request was made (success or rate limit)
+        if "success" in result.lower() or "limit" in result.lower():
+            USER_COOLDOWN[user_id] = time.time() + COOLDOWN_TIME
+        
+        # Edit the original processing message with result
+        bot.edit_message_text(
+            chat_id=message.chat.id,
+            message_id=processing_msg.message_id,
+            text=result
+        )
+        
+    except Exception as e:
+        logging.error(f"Bot error: {e}")
+        bot.reply_to(message, "⚠️ An unexpected error occurred. Please try again later.")
+
+@bot.message_handler(commands=['ereset', 'dreset', 'status'])
+def admin_controls(message):
+    """Handle admin commands"""
+    global RESET_ENABLED
+    
+    if message.from_user.id != ADMIN_ID:
+        bot.reply_to(message, "❌ You are not authorized to use this command.")
+        return
+        
+    command = message.text.split()[0]
+    
+    if command == '/ereset':
+        RESET_ENABLED = True
+        bot.reply_to(message, "✅ Password reset functionality ENABLED.")
+    elif command == '/dreset':
+        RESET_ENABLED = False
+        bot.reply_to(message, "❌ Password reset functionality DISABLED.")
+    elif command == '/status':
+        status = "ENABLED" if RESET_ENABLED else "DISABLED"
+        bot.reply_to(message, f"🔹 Current status: Password reset is {status}")
+
+# Flask route for Vercel
+@app.route('/', methods=['GET', 'POST'])
+def webhook():
+    if request.method == 'POST':
+        json_data = request.get_data().decode('utf-8')
+        update = telebot.types.Update.de_json(json_data)
+        bot.process_new_updates([update])
+        return 'ok', 200
+    return 'Hello World!'
+
+# Set webhook
+def set_webhook():
+    vercel_url = os.getenv('VERCEL_URL')  # Your Vercel app URL
+    if vercel_url:
+        webhook_url = f"{vercel_url}/"
+        bot.remove_webhook()
+        time.sleep(1)
+        bot.set_webhook(url=webhook_url)
+        logging.info(f"Webhook set to: {webhook_url}")
+
+# Initialize
+if __name__ == '__main__':
+    logging.info("Starting Instagram Password Reset Bot...")
+    set_webhook()
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
